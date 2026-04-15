@@ -29,6 +29,12 @@ const RETRY_MAX_MS = 30000;
 const REQUEST_TIMEOUT_MS = 5000;
 const MAX_QUEUE_LENGTH = 200;
 
+// How many recently-finished matches to include in each tset snapshot
+// and how far back to look. Tournaments can end 200+ matches in a
+// session, but viewers only care about the last handful.
+const RECENT_FINISHED_LIMIT = 10;
+const RECENT_FINISHED_WINDOW_MS = 4 * 60 * 60 * 1000;
+
 function craft_court(c) {
 	return utils.pluck(c, ['num', 'match_id', '_id']);
 }
@@ -52,7 +58,37 @@ function craft_match(m) {
 		// lookup yields nothing — relevant for international tournaments.
 		res['p' + tidx + '_nationalities'] = t.players.map(p => p.nationality || null);
 	});
+	// Optional end/winner info — only present for finished matches. Running
+	// matches leave these as undefined and JSON.stringify drops them, so
+	// receivers see `end_ts` / `team1_won` only in the recent_finished_matches
+	// array and never on live courts.
+	if (m.end_ts) {
+		res.end_ts = m.end_ts;
+	}
+	if (m.team1_won !== undefined && m.team1_won !== null) {
+		res.team1_won = m.team1_won;
+	}
 	return res;
+}
+
+// Pick the last N matches that have a non-null team1_won and ended
+// within the configured lookback window. Sorted newest-first so a
+// viewer can iterate straight into a "last finished" panel without
+// another sort pass.
+function pick_recent_finished(db_matches, now) {
+	const cutoff = now - RECENT_FINISHED_WINDOW_MS;
+	const finished = [];
+	for (const m of db_matches) {
+		if (!m.end_ts) continue;
+		if (m.team1_won === undefined || m.team1_won === null) continue;
+		if (m.end_ts < cutoff) continue;
+		finished.push(m);
+	}
+	finished.sort((a, b) => b.end_ts - a.end_ts);
+	if (finished.length > RECENT_FINISHED_LIMIT) {
+		finished.length = RECENT_FINISHED_LIMIT;
+	}
+	return finished;
 }
 
 class TickerConnHttp {
@@ -317,6 +353,14 @@ class TickerConnHttp {
 				}
 			}
 
+			// Base fields that don't depend on tournament metadata. Built
+			// once and spread into whichever branch we take below.
+			const base = {
+				courts: db_courts.map(craft_court),
+				matches: interesting_matches.map(craft_match),
+				recent_finished_matches: pick_recent_finished(db_matches, now).map(craft_match),
+			};
+
 			if (db_tournaments && db_tournaments.length == 1) {
 				const tournament = db_tournaments[0];
 				const tname = tournament.name;
@@ -336,39 +380,31 @@ class TickerConnHttp {
 								webp: 'image/webp',
 							}[filetype];
 
-							return cb(null, {
-								courts: db_courts.map(craft_court),
-								matches: interesting_matches.map(craft_match),
+							return cb(null, Object.assign({}, base, {
 								tournament_name: tname,
 								tournament_url: turl,
 								tournament_logo: base64_image,
 								tournament_logo_mime: mime,
 								tournament_logo_background_color: tournament.logo_background_color,
-							});
+							}));
 						})
 						.catch(() => {
-							return cb(null, {
-								courts: db_courts.map(craft_court),
-								matches: interesting_matches.map(craft_match),
+							return cb(null, Object.assign({}, base, {
 								tournament_name: tname,
 								tournament_url: turl,
-							});
+							}));
 						});
 				} else {
-					return cb(null, {
-						courts: db_courts.map(craft_court),
-						matches: interesting_matches.map(craft_match),
+					return cb(null, Object.assign({}, base, {
 						tournament_name: tname,
 						tournament_url: turl,
-					});
+					}));
 				}
 			} else {
-				return cb(null, {
-					courts: db_courts.map(craft_court),
-					matches: interesting_matches.map(craft_match),
+				return cb(null, Object.assign({}, base, {
 					tournament_name: '',
 					tournament_url: '',
-				});
+				}));
 			}
 		});
 	}

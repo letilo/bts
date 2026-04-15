@@ -31,10 +31,13 @@ function make_fake_app(opts) {
 	opts = opts || {};
 	const include_member_ids = opts.include_member_ids !== false;
 	const include_nationalities = opts.include_nationalities !== false;
+	const extra_matches = opts.extra_matches || [];
 	return {
 		db: {
 			fetch_all: function(queries, cb) {
-				// Minimal snapshot: one court, one match, one tournament.
+				// Minimal snapshot: one court, one live match, one tournament,
+				// plus optional extra matches that exercise the
+				// recent_finished_matches filter.
 				const alice = {name: 'Alice'};
 				const bob = {name: 'Bob'};
 				if (include_member_ids) {
@@ -45,24 +48,43 @@ function make_fake_app(opts) {
 					alice.nationality = 'GER';
 					bob.nationality = 'FRA';
 				}
+				const live_match = {
+					_id: 'm1',
+					network_score: [[0, 0]],
+					setup: {
+						scoring_format: {},
+						event_name: 'HE',
+						match_name: '1',
+						teams: [
+							{players: [alice]},
+							{players: [bob]},
+						],
+					},
+				};
 				cb(null,
 					[{num: 1, match_id: 'm1', _id: 'c1'}],
-					[{
-						_id: 'm1',
-						network_score: [[0, 0]],
-						setup: {
-							scoring_format: {},
-							event_name: 'HE',
-							match_name: '1',
-							teams: [
-								{players: [alice]},
-								{players: [bob]},
-							],
-						},
-					}],
+					[live_match].concat(extra_matches),
 					[{key: 'tk', name: 'Test', btp_settings: {}, tguid: null}]
 				);
 			},
+		},
+	};
+}
+
+function make_finished_match(id, end_ts, team1_won, score) {
+	return {
+		_id: id,
+		network_score: score || [[21, 19], [21, 15]],
+		end_ts: end_ts,
+		team1_won: team1_won,
+		setup: {
+			scoring_format: {},
+			event_name: 'HE',
+			match_name: id,
+			teams: [
+				{players: [{name: 'Winner'}]},
+				{players: [{name: 'Loser'}]},
+			],
 		},
 	};
 }
@@ -305,6 +327,80 @@ _describe('ticker_conn_http', function() {
 		const m = received[0].event.matches[0];
 		assert.deepStrictEqual(m.p0_nationalities, [null]);
 		assert.deepStrictEqual(m.p1_nationalities, [null]);
+	});
+
+	_it('tset includes recent_finished_matches newest-first, capped at 10', async function() {
+		const received = [];
+		const {server, url} = await make_server((req, body, res) => {
+			received.push(body);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"type":"answer","status":"ok"}');
+		});
+
+		const now = Date.now();
+		// Build 12 finished matches spread over the last hour, plus one
+		// that is outside the lookback window (should be excluded).
+		const extras = [];
+		for (let i = 0; i < 12; i++) {
+			extras.push(make_finished_match('f' + i, now - i * 60 * 1000, i % 2 === 0));
+		}
+		// Way too old -> must not appear
+		extras.push(make_finished_match('too_old', now - 5 * 60 * 60 * 1000, true));
+		// Running match (no end_ts) -> must not appear
+		extras.push({
+			_id: 'running',
+			network_score: [[10, 5]],
+			setup: {
+				scoring_format: {},
+				event_name: 'HE',
+				match_name: 'running',
+				teams: [{players: [{name: 'A'}]}, {players: [{name: 'B'}]}],
+			},
+		});
+
+		const conn = new ticker_conn_http.TickerConnHttp(
+			make_fake_app({extra_matches: extras}),
+			url,
+			'pw',
+			'tk'
+		);
+		await wait(300);
+		conn.terminate();
+		server.close();
+
+		const ev = received[0].event;
+		assert.ok(Array.isArray(ev.recent_finished_matches));
+		// Capped at 10
+		assert.strictEqual(ev.recent_finished_matches.length, 10);
+		// Newest first: f0 has end_ts now, f1 has now-60s, ...
+		assert.strictEqual(ev.recent_finished_matches[0]._id, 'f0');
+		assert.strictEqual(ev.recent_finished_matches[9]._id, 'f9');
+		// Each finished match carries end_ts + team1_won
+		assert.ok(typeof ev.recent_finished_matches[0].end_ts === 'number');
+		assert.strictEqual(typeof ev.recent_finished_matches[0].team1_won, 'boolean');
+		// The running match on the live court does NOT leak end_ts/team1_won
+		assert.ok(ev.matches[0]);
+		assert.strictEqual(ev.matches[0].end_ts, undefined);
+		assert.strictEqual(ev.matches[0].team1_won, undefined);
+	});
+
+	_it('recent_finished_matches is [] when there are no finished matches', async function() {
+		const received = [];
+		const {server, url} = await make_server((req, body, res) => {
+			received.push(body);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"type":"answer","status":"ok"}');
+		});
+
+		const conn = new ticker_conn_http.TickerConnHttp(make_fake_app(), url, 'pw', 'tk');
+		await wait(300);
+		conn.terminate();
+		server.close();
+
+		const ev = received[0].event;
+		// Field is always present for shape stability
+		assert.ok(Array.isArray(ev.recent_finished_matches));
+		assert.strictEqual(ev.recent_finished_matches.length, 0);
 	});
 
 	_it('sample payload from ticker_data/beispiel_request.json validates', function() {
