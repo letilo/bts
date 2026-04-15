@@ -307,6 +307,14 @@ function _craft_team(par) {
 			pres.btp_id = p.ID[0];
 		}
 
+		// Federation-wide member ID (e.g. "08-009763"). Parallel to btp_id,
+		// which is scoped to the BTP tournament file and thus not portable.
+		// member_id is what a downstream viewer / ticker uses to link to a
+		// player profile on an external system (badhub, turnier.de, etc.).
+		if (p.MemberID && p.MemberID[0]) {
+			pres.member_id = p.MemberID[0];
+		}
+
 		if (p.Country && p.Country[0]) {
 			pres.nationality = p.Country[0];
 		}

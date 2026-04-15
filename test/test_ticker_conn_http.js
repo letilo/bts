@@ -27,11 +27,19 @@ const ticker_conn_http = require('../bts/ticker_conn_http');
 const _describe = describe;
 const _it = it;
 
-function make_fake_app() {
+function make_fake_app(opts) {
+	opts = opts || {};
+	const include_member_ids = opts.include_member_ids !== false;
 	return {
 		db: {
 			fetch_all: function(queries, cb) {
 				// Minimal snapshot: one court, one match, one tournament.
+				const alice = {name: 'Alice'};
+				const bob = {name: 'Bob'};
+				if (include_member_ids) {
+					alice.member_id = '08-000001';
+					bob.member_id = '08-000002';
+				}
 				cb(null,
 					[{num: 1, match_id: 'm1', _id: 'c1'}],
 					[{
@@ -42,8 +50,8 @@ function make_fake_app() {
 							event_name: 'HE',
 							match_name: '1',
 							teams: [
-								{players: [{name: 'Alice'}]},
-								{players: [{name: 'Bob'}]},
+								{players: [alice]},
+								{players: [bob]},
 							],
 						},
 					}],
@@ -195,6 +203,59 @@ _describe('ticker_conn_http', function() {
 		const conn = new ticker_conn_http.TickerConnHttp(make_fake_app(), 'http://example.com/wrong', 'pw', 'tk');
 		assert.ok(conn);
 		conn.terminate();
+	});
+
+	_it('tset includes p0_member_ids / p1_member_ids when set', async function() {
+		const received = [];
+		const {server, url} = await make_server((req, body, res) => {
+			received.push(body);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"type":"answer","status":"ok"}');
+		});
+
+		const conn = new ticker_conn_http.TickerConnHttp(make_fake_app(), url, 'pw', 'tk');
+		await wait(300);
+		conn.terminate();
+		server.close();
+
+		assert.strictEqual(received.length, 1);
+		const tset = received[0];
+		assert.strictEqual(tset.type, 'tset');
+		assert.ok(Array.isArray(tset.event.matches));
+		assert.strictEqual(tset.event.matches.length, 1);
+
+		const m = tset.event.matches[0];
+		assert.deepStrictEqual(m.p0, ['Alice']);
+		assert.deepStrictEqual(m.p1, ['Bob']);
+		// Parallel arrays aligned 1:1 with p0 / p1
+		assert.deepStrictEqual(m.p0_member_ids, ['08-000001']);
+		assert.deepStrictEqual(m.p1_member_ids, ['08-000002']);
+	});
+
+	_it('tset falls back to null member_ids when player has no member_id', async function() {
+		const received = [];
+		const {server, url} = await make_server((req, body, res) => {
+			received.push(body);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"type":"answer","status":"ok"}');
+		});
+
+		const conn = new ticker_conn_http.TickerConnHttp(
+			make_fake_app({include_member_ids: false}),
+			url,
+			'pw',
+			'tk'
+		);
+		await wait(300);
+		conn.terminate();
+		server.close();
+
+		const m = received[0].event.matches[0];
+		assert.deepStrictEqual(m.p0, ['Alice']);
+		assert.deepStrictEqual(m.p1, ['Bob']);
+		// Player objects without member_id -> null entries, array is still present
+		assert.deepStrictEqual(m.p0_member_ids, [null]);
+		assert.deepStrictEqual(m.p1_member_ids, [null]);
 	});
 
 	_it('sample payload from ticker_data/beispiel_request.json validates', function() {
