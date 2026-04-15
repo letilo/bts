@@ -22,13 +22,17 @@ function craft_match(m) {
 	res.n = m.setup.event_name + ' ' + m.setup.match_name;
 	m.setup.teams.forEach((t, tidx) => {
 		res['p' + tidx] = t.players.map(p => p.name);
-		// Parallel array of federation member IDs (e.g. "08-009763"), aligned
-		// one-to-one with `p{tidx}`. Entries are null if the player object
-		// has no member_id — downstream consumers must cope with nulls.
-		// Kept as a separate array instead of turning `p{tidx}` into objects
-		// to stay backward compatible with existing ticker receivers that
-		// only look at the name arrays.
+		// Parallel arrays aligned one-to-one with `p{tidx}`. Kept as
+		// separate flat arrays (instead of turning `p{tidx}` into an array
+		// of objects) to stay backward compatible with existing ticker
+		// receivers that only look at the name arrays. Entries are null
+		// when the player object has no value for that field — downstream
+		// consumers must cope with nulls.
 		res['p' + tidx + '_member_ids'] = t.players.map(p => p.member_id || null);
+		// ISO 3-letter country code (e.g. "GER", "FRA", "JPN"), lets a
+		// downstream viewer render a flag even when the local member_id
+		// lookup yields nothing — relevant for international tournaments.
+		res['p' + tidx + '_nationalities'] = t.players.map(p => p.nationality || null);
 	});
 	return res;
 }

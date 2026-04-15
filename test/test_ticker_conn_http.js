@@ -30,6 +30,7 @@ const _it = it;
 function make_fake_app(opts) {
 	opts = opts || {};
 	const include_member_ids = opts.include_member_ids !== false;
+	const include_nationalities = opts.include_nationalities !== false;
 	return {
 		db: {
 			fetch_all: function(queries, cb) {
@@ -39,6 +40,10 @@ function make_fake_app(opts) {
 				if (include_member_ids) {
 					alice.member_id = '08-000001';
 					bob.member_id = '08-000002';
+				}
+				if (include_nationalities) {
+					alice.nationality = 'GER';
+					bob.nationality = 'FRA';
 				}
 				cb(null,
 					[{num: 1, match_id: 'm1', _id: 'c1'}],
@@ -256,6 +261,50 @@ _describe('ticker_conn_http', function() {
 		// Player objects without member_id -> null entries, array is still present
 		assert.deepStrictEqual(m.p0_member_ids, [null]);
 		assert.deepStrictEqual(m.p1_member_ids, [null]);
+	});
+
+	_it('tset includes p0_nationalities / p1_nationalities when set', async function() {
+		const received = [];
+		const {server, url} = await make_server((req, body, res) => {
+			received.push(body);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"type":"answer","status":"ok"}');
+		});
+
+		const conn = new ticker_conn_http.TickerConnHttp(make_fake_app(), url, 'pw', 'tk');
+		await wait(300);
+		conn.terminate();
+		server.close();
+
+		const m = received[0].event.matches[0];
+		// Nationalities are parallel to p0 / p1 and carry the ISO-3 country
+		// code from the player object, enabling flag rendering downstream
+		// independently of the member_id lookup.
+		assert.deepStrictEqual(m.p0_nationalities, ['GER']);
+		assert.deepStrictEqual(m.p1_nationalities, ['FRA']);
+	});
+
+	_it('tset falls back to null nationalities when player has no nationality', async function() {
+		const received = [];
+		const {server, url} = await make_server((req, body, res) => {
+			received.push(body);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"type":"answer","status":"ok"}');
+		});
+
+		const conn = new ticker_conn_http.TickerConnHttp(
+			make_fake_app({include_nationalities: false}),
+			url,
+			'pw',
+			'tk'
+		);
+		await wait(300);
+		conn.terminate();
+		server.close();
+
+		const m = received[0].event.matches[0];
+		assert.deepStrictEqual(m.p0_nationalities, [null]);
+		assert.deepStrictEqual(m.p1_nationalities, [null]);
 	});
 
 	_it('sample payload from ticker_data/beispiel_request.json validates', function() {
