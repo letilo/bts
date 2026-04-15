@@ -234,6 +234,21 @@ async function handle_score_update(app, ws, msg) {
 		},
 		(match, cb) => db.courts.findOne(court_q, (err, court) => cb(err, match, court)),
 		(match, court, cb) => {
+			// The `changed_court` flag distinguishes two kinds of score handler
+			// events downstream:
+			//   true  -> the match<->court assignment actually changed (e.g. a
+			//            match was (re)placed on this court); a full snapshot
+			//            needs to be broadcast
+			//   false -> only the score / status of the current match on this
+			//            court changed; a partial update is enough
+			//
+			// Before this fix the "match exists" branch unconditionally set
+			// `changed_court = true`, which meant every score tap sent by the
+			// umpire panel triggered a full `tset` ticker push instead of the
+			// cheaper `tupdate_match`. Additionally the `!match` branch forgot
+			// to `return` after the async `db.courts.update` call, so the
+			// synchronous `cb(..., true)` at the bottom fired a second time
+			// and the async waterfall received a double callback.
 			if (!match) {
 				if (court.match_id === match_id) {
 					cb(null, match, court, false);
@@ -243,8 +258,11 @@ async function handle_score_update(app, ws, msg) {
 				db.courts.update(court_q, { $set: { match_id: match_id } }, {}, (err) => {
 					cb(err, match, court, true);
 				});
+				return;
 			}
-			cb(null, match, court, true);
+			// Match exists and we did not touch the court document -> the
+			// court assignment is unchanged, this is a pure score update.
+			cb(null, match, court, false);
 		},
 		(match, court, changed_court, cb) => {
 			if (match && changed_court) {
