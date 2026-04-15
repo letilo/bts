@@ -80,3 +80,26 @@ at international tournaments with guest players.
 `tupdate_match` messages are unaffected — they continue to carry only
 `{_id, s}` and never re-transmit player data. Player identity is
 established through the surrounding `tset` snapshot.
+
+## Ticker payload: recently finished matches
+
+Each `tset` payload carries an `event.recent_finished_matches` array
+alongside `event.matches`. It contains the last 10 matches that
+finished within the previous 4 hours, sorted newest-first. Each entry
+uses the same schema as a live match plus two extra fields:
+
+- `end_ts` — Unix timestamp (ms) when the match finished
+- `team1_won` — `true` if team 0 (`p0`) won, `false` otherwise
+
+The live `event.matches` array continues to hold only the matches that
+are currently on a court. Finished matches remain visible on their
+court for up to 15 minutes (unchanged from before), then move out of
+`event.matches` but stay in `recent_finished_matches` until the 4-hour
+window or the 10-entry cap pushes them out.
+
+`end_ts` and `team1_won` are emitted on a match only when they are set
+— running matches on a live court do not carry these fields. Consumers
+should treat them as optional.
+
+The field is always present (even as `[]`) for shape stability. A
+receiver can iterate it unconditionally.
