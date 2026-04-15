@@ -12,6 +12,7 @@ const btp_manager = require('./btp_manager');
 const btp_conn = require('./btp_conn');
 const ticker_manager = require('./ticker_manager');
 const update_queue = require('./update_queue');
+const match_automation = require('./match_automation');
 const stournament = require('./stournament');
 const all_panels = [];
 
@@ -60,6 +61,32 @@ function notify_change_broadcast(app, tournament_key, ctype, val) {
 	for (const panel_ws of all_panels) {
 		notify_change_send(app, panel_ws, tournament_key, ctype, val);
 	}
+}
+
+function _clear_court_match_reference_after_finish(app, tournament_key, court_q, court, match_id, finish_confirmed, callback) {
+	if (!finish_confirmed || !court || court.match_id !== match_id) {
+		return callback(null, false);
+	}
+	app.db.courts.update(
+		court_q,
+		{ $set: { match_id: null } },
+		{ returnUpdatedDocs: true },
+		(err, _numAffected, updated_court) => {
+			if (err) {
+				return callback(err);
+			}
+			if (updated_court) {
+				admin.notify_change(app, tournament_key, 'court_changed', {
+					court_id: updated_court._id,
+					is_active: updated_court.is_active,
+					has_umpire: updated_court.has_umpire,
+					has_service_judge: updated_court.has_service_judge,
+					match_id: null,
+				});
+			}
+			callback(null, !!updated_court);
+		}
+	);
 }
 
 function notify_change_ws(app, ws, tournament_key, court_id, ctype, val) {
@@ -138,103 +165,178 @@ async function handle_persist_display_settings(app, ws, msg) {
 	}
 }
 async function handle_score_update(app, ws, msg) {
-	const match_utils = require('./match_utils');
-	const tournament_key = msg.tournament_key;
-	const score_data = msg.score;
-	const match_id = score_data.match_id;
-	
-	try{
-		var match = await match_utils.fetch_match(app, tournament_key, match_id);
-	} catch {
-		var match = null;
-	}
-	const finish_confirmed = score_data.finish_confirmed ? score_data.finish_confirmed : false;
-	const allow_finished_confirmation = finish_confirmed && (score_data.team1_won !== undefined && score_data.team1_won !== null);
-	if (match == null || (match.setup.now_on_court == false && !allow_finished_confirmation)) {
-		send_error(ws, tournament_key, "Match not found or not on court actualy.");
-		return;
-	}
-
-	const update = {
-		network_score: score_data.network_score,
-		network_team1_left:score_data.network_team1_left,
-		network_team1_serving:score_data.network_team1_serving,
-		network_teams_player1_even:score_data.network_teams_player1_even,
-		presses:score_data.presses,
-		duration_ms:score_data.duration_ms,
-		end_ts:score_data.end_ts,
-		'setup.now_on_court': true,
-	};
-
-	const device_info = score_data.device;
-	if (device_info) {
-		const client_ip = ws._socket.remoteAddress;
-		device_info.client_ip = client_ip;
-	}
-
-	const match_finished = score_data.team1_won !== undefined && score_data.team1_won !== null;
-	if (finish_confirmed) {
-		update["setup.now_on_court"] = false;
-		update.team1_won = score_data.team1_won;
-	}
-	if (finish_confirmed) {
-		update.btp_winner = (update.team1_won === true) ? 1 : 2;
-		update.btp_needsync = true;
-	}
-
-	if (score_data.shuttle_count) {
-		update.shuttle_count = score_data.shuttle_count;
-	}
-	const match_query = {
-		_id: match_id,
-		tournament_key,
-	};
-
-	const court_q = {
-		tournament_key,
-		_id: score_data.court_id,
-	};
-	const db = app.db;
-	async.waterfall([
-		cb => db.matches.update(match_query, { $set: update }, { returnUpdatedDocs: true }, (err, _, match) => cb(err, match)),
-		(match, cb) => {
-			if (match) {
-				handle_score_change(app, tournament_key, match.setup.court_id);
-				admin.notify_change(app, tournament_key, 'score', {
-					match_id,
-					network_score: update.network_score,
-					team1_won: update.team1_won,
-					shuttle_count: update.shuttle_count,
-					presses: match.presses,
-				});
+	return update_queue.instance().execute(update_queue.named('handle_score_update', () => new Promise((resolve) => {
+		const match_utils = require('./match_utils');
+		const tournament_key = msg.tournament_key;
+		const score_data = msg.score;
+		const match_id = score_data.match_id;
+		let finished = false;
+		const finish = (err) => {
+			if (finished) {
+				return;
 			}
-			cb(null, match);
-		},
-		(match, cb) => {
-				if (match) {
-					if (finish_confirmed) {
-						if (finish_confirmed) {
-							btp_manager.update_score(app, match);
+			finished = true;
+			clearTimeout(timeout);
+			if (err) {
+				send_error(ws, tournament_key, err.message || String(err));
+			}
+			resolve();
+		};
+		const timeout = setTimeout(() => {
+			finish(new Error('handle_score_update timeout'));
+		}, 5000);
+
+		(async () => {
+			let match = null;
+			let tournament = null;
+			let court = null;
+			try {
+				const fetch_tournament = new Promise((resolve, reject) => {
+					app.db.tournaments.findOne({ key: tournament_key }, (err, found_tournament) => {
+						if (err) {
+							return reject(err);
 						}
-						update_queue.instance().execute(match_utils.reset_player_tabletoperator, app, tournament_key, match_id, update.end_ts)
-							.then(() => {
-								cb(null, match);
-						})
-						.catch((err) => {
-							console.error("Error in reset_player_tabletoperator:", err);
-							cb(null, match);
-						});
-
-				} else {
-					cb(null, match);
-				}
-			} else {
-				cb(null, match);
+						resolve(found_tournament);
+					});
+				});
+				const fetch_court = new Promise((resolve, reject) => {
+					app.db.courts.findOne({ tournament_key, _id: score_data.court_id }, (err, found_court) => {
+						if (err) {
+							return reject(err);
+						}
+						resolve(found_court);
+					});
+				});
+				[match, tournament, court] = await Promise.all([
+					match_utils.fetch_match(app, tournament_key, match_id),
+					fetch_tournament,
+					fetch_court,
+				]);
+			} catch {
+				match = null;
+				tournament = null;
+				court = null;
 			}
-		},
-		(match, cb) => db.courts.findOne(court_q, (err, court) => cb(err, match, court)),
-		(match, court, cb) => {
-			// The `changed_court` flag distinguishes two kinds of score handler
+			const finish_confirmed = score_data.finish_confirmed ? score_data.finish_confirmed : false;
+			const allow_finished_confirmation = finish_confirmed && (score_data.team1_won !== undefined && score_data.team1_won !== null);
+			if (match == null || (match.setup.now_on_court == false && !allow_finished_confirmation)) {
+				send_error(ws, tournament_key, "Match not found or not on court actualy.");
+				return finish();
+			}
+			if (!court) {
+				send_error(ws, tournament_key, "Court for score update not found.");
+				return finish();
+			}
+			if (ws.court_id && score_data.court_id && ws.court_id !== score_data.court_id) {
+				send_error(ws, tournament_key, "Score update rejected: panel is assigned to a different court.");
+				return finish();
+			}
+			if (match.setup && match.setup.court_id && score_data.court_id && match.setup.court_id !== score_data.court_id) {
+				send_error(ws, tournament_key, "Score update rejected: match is assigned to a different court.");
+				return finish();
+			}
+			const expected_match_for_court =
+				court.match_id === match_id ||
+				(!court.match_id && match.setup && match.setup.court_id === score_data.court_id && match.setup.now_on_court === true);
+			if (!expected_match_for_court) {
+				send_error(ws, tournament_key, "Score update rejected: stale panel state for this court.");
+				return finish();
+			}
+
+			const update = {
+				network_score: score_data.network_score,
+				network_team1_left:score_data.network_team1_left,
+				network_team1_serving:score_data.network_team1_serving,
+				network_teams_player1_even:score_data.network_teams_player1_even,
+				presses:score_data.presses,
+				duration_ms:score_data.duration_ms,
+				end_ts:score_data.end_ts,
+				'setup.now_on_court': true,
+				'setup.state': 'oncourt',
+			};
+
+			const device_info = score_data.device;
+			if (device_info) {
+				const client_ip = ws._socket.remoteAddress;
+				device_info.client_ip = client_ip;
+			}
+
+			if (finish_confirmed) {
+				update["setup.now_on_court"] = false;
+				update["setup.state"] = 'finished';
+				update.team1_won = score_data.team1_won;
+				update.btp_winner = (update.team1_won === true) ? 1 : 2;
+				update.btp_needsync = true;
+			}
+
+			if (score_data.shuttle_count) {
+				update.shuttle_count = score_data.shuttle_count;
+			}
+
+			const simulated_match = {
+				...match,
+				network_score: update.network_score,
+				team1_won: update.team1_won,
+				setup: {
+					...match.setup,
+					now_on_court: update['setup.now_on_court'],
+					state: update['setup.state'],
+				},
+			};
+			const preparation_successor_state = match_automation.calculate_preparation_successor_state(simulated_match, tournament);
+			update['setup.needs_preparation_successor'] = preparation_successor_state.needs_preparation_successor;
+			update['setup.needs_preparation_successor_ts'] = preparation_successor_state.needs_preparation_successor_ts;
+
+			const match_query = {
+				_id: match_id,
+				tournament_key,
+			};
+
+			const court_q = {
+				tournament_key,
+				_id: score_data.court_id,
+			};
+			const db = app.db;
+			async.waterfall([
+				cb => {
+					db.matches.update(match_query, { $set: update }, { returnUpdatedDocs: true }, (err, _, updated_match) => cb(err, updated_match));
+				},
+				(updated_match, cb) => {
+					if (updated_match) {
+						handle_score_change(app, tournament_key, updated_match.setup.court_id);
+						admin.notify_change(app, tournament_key, 'score', {
+							match_id,
+							network_score: update.network_score,
+							team1_won: update.team1_won,
+							shuttle_count: update.shuttle_count,
+							presses: updated_match.presses,
+							court_id: updated_match.setup && updated_match.setup.court_id,
+							now_on_court: updated_match.setup && updated_match.setup.now_on_court,
+						});
+					}
+					cb(null, updated_match);
+				},
+				(updated_match, cb) => {
+					if (updated_match && finish_confirmed) {
+						btp_manager.update_score(app, updated_match);
+						match_utils.reset_player_tabletoperator(app, tournament_key, match_id, update.end_ts)
+							.then(() => cb(null, updated_match))
+							.catch((err) => {
+								console.error("Error in reset_player_tabletoperator:", err);
+								cb(err);
+							});
+						return;
+					}
+					cb(null, updated_match);
+				},
+				(updated_match, cb) => {
+					cb(null, updated_match, court);
+				},
+				(updated_match, court, cb) => {
+					if (!court) {
+						return cb(new Error('Cannot find court ' + JSON.stringify(score_data.court_id)));
+					}
+					// The `changed_court` flag distinguishes two kinds of score handler
 			// events downstream:
 			//   true  -> the match<->court assignment actually changed (e.g. a
 			//            match was (re)placed on this court); a full snapshot
@@ -249,74 +351,95 @@ async function handle_score_update(app, ws, msg) {
 			// to `return` after the async `db.courts.update` call, so the
 			// synchronous `cb(..., true)` at the bottom fired a second time
 			// and the async waterfall received a double callback.
-			if (!match) {
-				if (court.match_id === match_id) {
-					cb(null, match, court, false);
-					return;
-				}
+			if (!updated_match) {
+						if (court.match_id === match_id) {
+							cb(null, updated_match, court, false);
+							return;
+						}
 
-				db.courts.update(court_q, { $set: { match_id: match_id } }, {}, (err) => {
-					cb(err, match, court, true);
-				});
+						db.courts.update(court_q, { $set: { match_id: match_id } }, {}, (err) => {
+							cb(err, updated_match, court, true);
+						});
+						return;
 				return;
 			}
 			// Match exists and we did not touch the court document -> the
 			// court assignment is unchanged, this is a pure score update.
-			cb(null, match, court, false);
-		},
-		(match, court, changed_court, cb) => {
-			if (match && changed_court) {
-				admin.notify_change(app, tournament_key, 'court_current_match', {
-					match__id: match_id,
-					match: match,
-				});
-			}
-			cb(null, match, changed_court);
-		},
-		(match, changed_court, cb) => {
-			if (match && match.setup.highlight &&
-				match.setup.highlight == 6 &&
-				match.network_score &&
-				match.network_score.length > 0 &&
-				match.network_score[0].length > 1 &&
-				(match.network_score[0][0] > 0 || match.network_score[0][1] > 0)) {
-				match.setup.highlight = 0;
-				btp_manager.update_highlight(app, match);
-			}
-			cb(null, match, changed_court);
-		},
-		(match, changed_court, cb) => {
-			if (changed_court) {
-				ticker_manager.pushall(app, tournament_key);
-			} else {
-				if (match) {
-					ticker_manager.update_score(app, match);
-				}
-			}
-			cb(null, match, changed_court);
-		},
-		(match, changed_court, cb) => {
-			if (!match) {
-				return cb(new Error('Cannot find match ' + JSON.stringify(match)));
-			}
-			if (finish_confirmed) {
-				update_queue.instance().execute(match_utils.call_preparation_match_on_court, app, tournament_key, match.setup.court_id);
-			}
-			return cb(null, match, changed_court);
-		},
-		(match, changed_court, cb) => {
-			if (!device_info) {
-				return cb(null, match, changed_court);
-			}
-			update_device_info(app, tournament_key, device_info);
-			return cb(null, match, changed_court);
-		},
-	], function (err) {
-		if (err) {
-			send_error(ws, tournament_key, err.message);
-			return;
-		}
-	});
+					cb(null, updated_match, court, false);
+				},
+				(updated_match, court, changed_court, cb) => {
+					if (updated_match && changed_court) {
+						admin.notify_change(app, tournament_key, 'court_current_match', {
+							match__id: match_id,
+							match: updated_match,
+						});
+					}
+					cb(null, updated_match, changed_court);
+				},
+				(updated_match, changed_court, cb) => {
+					if (updated_match && updated_match.setup.highlight &&
+						updated_match.setup.highlight == 6 &&
+						updated_match.network_score &&
+						updated_match.network_score.length > 0 &&
+						updated_match.network_score[0].length > 1 &&
+						(updated_match.network_score[0][0] > 0 || updated_match.network_score[0][1] > 0)) {
+						updated_match.setup.highlight = 0;
+						match_utils.normalize_preparation_state(updated_match.setup);
+						btp_manager.update_highlight(app, updated_match);
+					}
+					cb(null, updated_match, changed_court);
+				},
+				(updated_match, changed_court, cb) => {
+					if (changed_court) {
+						ticker_manager.pushall(app, tournament_key);
+					} else if (updated_match) {
+						ticker_manager.update_score(app, updated_match);
+					}
+					cb(null, updated_match, changed_court);
+				},
+				(updated_match, changed_court, cb) => {
+					_clear_court_match_reference_after_finish(app, tournament_key, court_q, court, match_id, finish_confirmed, (err) => {
+						if (err) {
+							return cb(err);
+						}
+						cb(null, updated_match, changed_court);
+					});
+				},
+				(updated_match, changed_court, cb) => {
+					if (!updated_match) {
+						return cb(new Error('Cannot find match ' + JSON.stringify(updated_match)));
+					}
+					match_utils.auto_execute_preparation_selection_for_setup(app, tournament, updated_match.setup, (err) => {
+						if (err) {
+							return cb(err);
+						}
+						return cb(null, updated_match, changed_court);
+					});
+				},
+				(updated_match, changed_court, cb) => {
+					if (!finish_confirmed || !score_data.court_id) {
+						return cb(null, updated_match, changed_court);
+					}
+					match_utils.call_preparation_match_on_court(app, tournament_key, score_data.court_id)
+						.then(() => cb(null, updated_match, changed_court))
+						.catch((err) => {
+							const message = err && (err.message || String(err));
+							if (/No match found to call on court/.test(message)) {
+								return cb(null, updated_match, changed_court);
+							}
+							return cb(err);
+						});
+				},
+				(updated_match, changed_court, cb) => {
+					if (!device_info) {
+						return cb(null, updated_match, changed_court);
+					}
+					update_device_info(app, tournament_key, device_info);
+					return cb(null, updated_match, changed_court);
+				},
+			], finish);
+		})().catch(finish);
+	})));
 }
 async function handle_device_info(app, ws, msg) {
 	const tournament_key = msg.tournament_key;
@@ -677,10 +800,73 @@ function handle_command_done(app, ws, msg) {
 }
 
 function handle_score_change(app, tournament_key, court_id) {
+	console.log('[bts] auto_call_trace:bup_handle_score_change', {
+		ts: Date.now(),
+		tournament_key,
+		court_id: court_id || null,
+		all_matches_delivery: !!all_matches_delivery(),
+	});
 	matches_handler(app, null, tournament_key, court_id);
 	if (all_matches_delivery()) {
 		matches_handler(app, null, tournament_key, undefined);
 	}
+}
+
+function get_bup_match_priority(match, prefer_finished_first) {
+	if (!match || !match.setup) {
+		return 99;
+	}
+	if (prefer_finished_first) {
+		if (match.setup.state === 'finished') {
+			return 0;
+		}
+		if (match.setup.now_on_court === true) {
+			return 1;
+		}
+		if (match.setup.state === 'oncourt') {
+			return 2;
+		}
+		if (match.setup.state === 'blocked') {
+			return 3;
+		}
+		return 4;
+	}
+	if (match.setup.now_on_court === true) {
+		return 0;
+	}
+	if (match.setup.state === 'oncourt') {
+		return 1;
+	}
+	if (match.setup.state === 'blocked') {
+		return 2;
+	}
+	if (match.setup.state === 'finished') {
+		return 3;
+	}
+	return 4;
+}
+
+function cmp_bup_matches(a, b, prefer_finished_first) {
+	const priority_diff = get_bup_match_priority(a, prefer_finished_first) - get_bup_match_priority(b, prefer_finished_first);
+	if (priority_diff !== 0) {
+		return priority_diff;
+	}
+
+	const a_called = (a && a.setup && a.setup.called_timestamp) || 0;
+	const b_called = (b && b.setup && b.setup.called_timestamp) || 0;
+	if (a_called !== b_called) {
+		return b_called - a_called;
+	}
+
+	const a_end = a && a.end_ts ? a.end_ts : 0;
+	const b_end = b && b.end_ts ? b.end_ts : 0;
+	if (a_end !== b_end) {
+		return b_end - a_end;
+	}
+
+	const a_id = (a && a.setup && a.setup.match_id) || '';
+	const b_id = (b && b.setup && b.setup.match_id) || '';
+	return a_id.localeCompare(b_id);
 }
 
 function matches_handler(app, ws, tournament_key, court_id) {
@@ -741,6 +927,7 @@ function matches_handler(app, ws, tournament_key, court_id) {
 		        matches = matches.filter(m => m.setup.now_on_court);
 		    }
 			matches = matches.filter(m => m.setup.state == 'oncourt' || m.setup.state == 'finished' || m.setup.state == 'blocked');
+			matches.sort((a, b) => cmp_bup_matches(a, b, !!court_id));
 
 		    db_courts.sort(utils.cmp_key('num'));
 		    const courts = db_courts.map(function (dc) {
@@ -761,6 +948,18 @@ function matches_handler(app, ws, tournament_key, court_id) {
 			const event = create_event_representation(tournament);
 			event.matches = matches;
 			event.courts = courts;
+			console.log('[bts] auto_call_trace:bup_score_update_payload', {
+				ts: Date.now(),
+				tournament_key,
+				court_id: court_id || null,
+				match_states: matches.map((match) => ({
+					match_id: match && match.setup && match.setup.match_id,
+					state: match && match.setup && match.setup.state,
+					now_on_court: match && match.setup && match.setup.now_on_court,
+					called_timestamp: match && match.setup && match.setup.called_timestamp,
+					end_ts: match && match.end_ts,
+				})),
+			});
 			const reply = {
 				status: 'ok',
 				event,
@@ -974,4 +1173,5 @@ module.exports = {
 	add_display_status,
 	create_match_representation,
 	create_event_representation,
+	_clear_court_match_reference_after_finish,
 };
