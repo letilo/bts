@@ -55,22 +55,27 @@ respond with HTTP 2xx plus an optional JSON body `{type:"answer",status:"ok"}`.
 Non-2xx triggers retry; a JSON body with `type:"error"` acknowledges the
 request but marks the message as rejected (it is not retried).
 
-## Ticker payload: player identifiers
+## Ticker payload: player identifiers and nationalities
 
-Each match in a `tset` payload carries two kinds of player arrays, one per
-team side:
+Each match in a `tset` payload carries three kinds of parallel arrays per
+team side, all aligned 1:1 (same array length, same index ordering):
 
-- `p0` / `p1` — array of player display names (unchanged)
-- `p0_member_ids` / `p1_member_ids` — parallel array of federation member
-  IDs (e.g. `"08-009763"`), aligned 1:1 with `p0` / `p1`. Entries are
-  `null` if the underlying player object has no `MemberID` in the BTP
-  source data (common for tournaments imported without federation data).
+- `p0` / `p1` — array of player display names
+- `p0_member_ids` / `p1_member_ids` — array of federation member IDs
+  (e.g. `"08-009763"`) for profile linking downstream. Entries are `null`
+  when the BTP source data carried no `MemberID` (common for tournaments
+  imported without federation data).
+- `p0_nationalities` / `p1_nationalities` — array of ISO 3-letter country
+  codes (e.g. `"GER"`, `"FRA"`, `"JPN"`) for flag rendering. Entries are
+  `null` if the player object has no country, which lets a receiver fall
+  back to a neutral icon without conditional array handling.
 
-The `_member_ids` arrays were added in a later change (see
-`feat/ticker-member-ids`) and are backward compatible: receivers that only
-look at `p0` / `p1` continue to work unchanged. New receivers can use
-`p0_member_ids` / `p1_member_ids` to link players to an external profile
-(badhub, turnier.de, etc.).
+These arrays were added in later changes (`feat/ticker-member-ids` and
+`feat/ticker-nationalities`) and are backward compatible: receivers that
+only look at `p0` / `p1` continue to work unchanged. New receivers can
+use the extra arrays to link to external profiles and to render country
+flags — both useful when the local profile lookup yields nothing, e.g.
+at international tournaments with guest players.
 
 `tupdate_match` messages are unaffected — they continue to carry only
 `{_id, s}` and never re-transmit player data. Player identity is
