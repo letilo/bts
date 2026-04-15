@@ -3,9 +3,22 @@
 const assert = require('assert');
 
 const ticker_conn = require('./ticker_conn');
+const ticker_conn_http = require('./ticker_conn_http');
 
 
 const conns_by_tkey = new Map();
+
+// Pick the transport implementation based on the URL scheme configured on
+// the tournament. ws:// / wss:// keeps the original persistent WebSocket;
+// http:// / https:// uses the HTTP-POST adapter for receivers that can't
+// host a long-lived WebSocket server (e.g. plain PHP/Apache shared hosting).
+function _create_conn(app, t) {
+	const url = t.ticker_url || '';
+	if (/^https?:\/\//i.test(url)) {
+		return new ticker_conn_http.TickerConnHttp(app, url, t.ticker_password, t.key);
+	}
+	return new ticker_conn.TickerConn(app, url, t.ticker_password, t.key);
+}
 
 function reconfigure(app, t) {
 	const cur_conn = conns_by_tkey.get(t.key);
@@ -17,7 +30,7 @@ function reconfigure(app, t) {
 		return;
 	}
 
-	const conn = new ticker_conn.TickerConn(app, t.ticker_url, t.ticker_password, t.key);
+	const conn = _create_conn(app, t);
 	conns_by_tkey.set(t.key, conn);
 }
 
