@@ -22,6 +22,13 @@ function craft_match(m) {
 	res.n = m.setup.event_name + ' ' + m.setup.match_name;
 	m.setup.teams.forEach((t, tidx) => {
 		res['p' + tidx] = t.players.map(p => p.name);
+		// Parallel array of federation member IDs (e.g. "08-009763"), aligned
+		// one-to-one with `p{tidx}`. Entries are null if the player object
+		// has no member_id — downstream consumers must cope with nulls.
+		// Kept as a separate array instead of turning `p{tidx}` into objects
+		// to stay backward compatible with existing ticker receivers that
+		// only look at the name arrays.
+		res['p' + tidx + '_member_ids'] = t.players.map(p => p.member_id || null);
 	});
 	return res;
 }

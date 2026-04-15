@@ -54,3 +54,24 @@ The receiver endpoint must accept `POST` on a path matching `/update` and
 respond with HTTP 2xx plus an optional JSON body `{type:"answer",status:"ok"}`.
 Non-2xx triggers retry; a JSON body with `type:"error"` acknowledges the
 request but marks the message as rejected (it is not retried).
+
+## Ticker payload: player identifiers
+
+Each match in a `tset` payload carries two kinds of player arrays, one per
+team side:
+
+- `p0` / `p1` — array of player display names (unchanged)
+- `p0_member_ids` / `p1_member_ids` — parallel array of federation member
+  IDs (e.g. `"08-009763"`), aligned 1:1 with `p0` / `p1`. Entries are
+  `null` if the underlying player object has no `MemberID` in the BTP
+  source data (common for tournaments imported without federation data).
+
+The `_member_ids` arrays were added in a later change (see
+`feat/ticker-member-ids`) and are backward compatible: receivers that only
+look at `p0` / `p1` continue to work unchanged. New receivers can use
+`p0_member_ids` / `p1_member_ids` to link players to an external profile
+(badhub, turnier.de, etc.).
+
+`tupdate_match` messages are unaffected — they continue to carry only
+`{_id, s}` and never re-transmit player data. Player identity is
+established through the surrounding `tset` snapshot.
