@@ -94,6 +94,17 @@ function craft_match(m) {
 	if (m.setup && m.setup.state === 'preparation') {
 		res.is_called = true;
 	}
+	// Scheduled date/time of the match. Lets a receiver render the
+	// printed-schedule time next to the match (e.g. "09:35 — HE A")
+	// and is the primary sort key for upcoming_matches. Strings are
+	// zero-padded by btp_sync (`time_str(...)`), which matches the
+	// lexicographic ordering NeDB uses in BTS' own queries.
+	if (m.setup && m.setup.scheduled_time_str) {
+		res.scheduled_time_str = m.setup.scheduled_time_str;
+	}
+	if (m.setup && m.setup.scheduled_date) {
+		res.scheduled_date = m.setup.scheduled_date;
+	}
 	return res;
 }
 
@@ -117,29 +128,56 @@ function pick_recent_finished(db_matches, now) {
 	return finished;
 }
 
+// True when at least one team has a player with a name. Used to skip
+// bracket follow-up matches whose participants are not yet decided
+// — those have setup.teams populated structurally but every player
+// name is empty/missing. Surfacing them on a hall display would just
+// fill the screen with "TBD vs TBD" rows ahead of the actually-next
+// matches.
+function has_at_least_one_player(m) {
+	if (!m.setup || !Array.isArray(m.setup.teams)) return false;
+	for (const team of m.setup.teams) {
+		if (!team || !Array.isArray(team.players)) continue;
+		for (const p of team.players) {
+			if (p && p.name) return true;
+		}
+	}
+	return false;
+}
+
 // Mirrors `calc_section(m) === 'unassigned'` from static/js/cmatch.js
 // — a match is "upcoming" when it is neither finished nor currently
-// being played on a court. This matches what BTS' own "Next Matches"
-// view shows. The setup.is_match guard skips placeholder rows that
-// the BTP import surfaces but that aren't actual matches.
+// being played on a court. The setup.is_match guard skips placeholder
+// rows that the BTP import surfaces but that aren't actual matches,
+// and the player-presence guard skips bracket slots whose participants
+// haven't been resolved yet.
 function is_upcoming(m) {
 	if (!m.setup) return false;
 	if (!m.setup.is_match) return false;
 	if (typeof m.team1_won === 'boolean') return false;
 	if (m.setup.court_id && m.setup.now_on_court) return false;
+	if (!has_at_least_one_player(m)) return false;
 	return true;
 }
 
-// Pick matches that are upcoming (not finished, not on a live court).
-// Sort identical to BTS' own next-matches UI in static/js/ctournament.js
-// (`get_self_check_in_matches`): ascending by preparation_call_timestamp,
-// missing timestamps fall back to 0 — which keeps the BTP-import order
-// stable for matches that have not been called yet.
+// Pick matches that are upcoming. Sort matches BTS' own NeDB query
+// from match_utils.js does (sort: scheduled_date asc,
+// scheduled_time_str asc, match_order asc) so the wire output mirrors
+// what an operator sees in the umpire UI. Strings are zero-padded by
+// the BTP import, so lexicographic comparison gives the right order.
 function pick_upcoming(db_matches) {
 	const upcoming = db_matches.filter(is_upcoming);
-	upcoming.sort((a, b) =>
-		(a.setup.preparation_call_timestamp || 0) -
-		(b.setup.preparation_call_timestamp || 0));
+	upcoming.sort((a, b) => {
+		const da = a.setup.scheduled_date || '';
+		const db_ = b.setup.scheduled_date || '';
+		if (da !== db_) return da < db_ ? -1 : 1;
+		const ta = a.setup.scheduled_time_str || '';
+		const tb = b.setup.scheduled_time_str || '';
+		if (ta !== tb) return ta < tb ? -1 : 1;
+		const oa = a.setup.match_order != null ? a.setup.match_order : 0;
+		const ob = b.setup.match_order != null ? b.setup.match_order : 0;
+		return oa - ob;
+	});
 	if (upcoming.length > UPCOMING_LIMIT) {
 		upcoming.length = UPCOMING_LIMIT;
 	}
