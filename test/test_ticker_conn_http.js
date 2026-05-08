@@ -91,6 +91,10 @@ function make_finished_match(id, end_ts, team1_won, score) {
 
 function make_upcoming_match(id, prep_call_ts, opts) {
 	opts = opts || {};
+	const teams = (opts.teams !== undefined) ? opts.teams : [
+		{players: [{name: 'Player1'}]},
+		{players: [{name: 'Player2'}]},
+	];
 	return {
 		_id: id,
 		network_score: [[0, 0]],
@@ -102,12 +106,12 @@ function make_upcoming_match(id, prep_call_ts, opts) {
 			state: opts.state,
 			preparation_call_timestamp: prep_call_ts,
 			match_num: opts.match_num,
+			scheduled_time_str: opts.scheduled_time_str,
+			scheduled_date: opts.scheduled_date,
+			match_order: opts.match_order,
 			court_id: opts.court_id,
 			now_on_court: opts.now_on_court,
-			teams: [
-				{players: [{name: 'Player1'}]},
-				{players: [{name: 'Player2'}]},
-			],
+			teams: teams,
 		},
 	};
 }
@@ -426,7 +430,7 @@ _describe('ticker_conn_http', function() {
 		assert.strictEqual(ev.recent_finished_matches.length, 0);
 	});
 
-	_it('tset includes upcoming_matches sorted by preparation_call_timestamp, capped at 15', async function() {
+	_it('tset includes upcoming_matches sorted by scheduled_date+time, capped at 15', async function() {
 		const received = [];
 		const {server, url} = await make_server((req, body, res) => {
 			received.push(body);
@@ -434,27 +438,64 @@ _describe('ticker_conn_http', function() {
 			res.end('{"type":"answer","status":"ok"}');
 		});
 
-		const now = Date.now();
 		const extras = [];
-		// 16 upcoming matches with descending call timestamps so the cap
-		// fires (u0 = newest call, u15 = oldest call). Ascending sort by
-		// preparation_call_timestamp puts u15 nearer the front, u0 last.
-		for (let i = 0; i < 16; i++) {
-			extras.push(make_upcoming_match('u' + i, now - i * 60 * 1000));
+		// 16 upcoming matches across two days with various scheduled times,
+		// inserted in shuffled order. Sort key is scheduled_date asc, then
+		// scheduled_time_str asc, then match_order asc — should bring day 1
+		// times in increasing order to the front, day 2 to the back.
+		const slots = [
+			{id: 'd2_1135', date: '2026-05-09', time: '11:35'},
+			{id: 'd1_0900', date: '2026-05-08', time: '09:00'},
+			{id: 'd1_1335', date: '2026-05-08', time: '13:35'},
+			{id: 'd1_0935', date: '2026-05-08', time: '09:35'},
+			{id: 'd2_0900', date: '2026-05-09', time: '09:00'},
+			{id: 'd1_1100', date: '2026-05-08', time: '11:00'},
+			{id: 'd1_1200', date: '2026-05-08', time: '12:00'},
+			{id: 'd1_1500', date: '2026-05-08', time: '15:00'},
+			{id: 'd2_1000', date: '2026-05-09', time: '10:00'},
+			{id: 'd1_0945', date: '2026-05-08', time: '09:45'},
+			{id: 'd1_1045', date: '2026-05-08', time: '10:45'},
+			{id: 'd1_1145', date: '2026-05-08', time: '11:45'},
+			{id: 'd1_1245', date: '2026-05-08', time: '12:45'},
+			{id: 'd1_1345', date: '2026-05-08', time: '13:45'},
+			{id: 'd1_1445', date: '2026-05-08', time: '14:45'},
+			{id: 'd1_1545', date: '2026-05-08', time: '15:45'},
+		];
+		for (const s of slots) {
+			extras.push(make_upcoming_match(s.id, undefined, {
+				scheduled_date: s.date,
+				scheduled_time_str: s.time,
+			}));
 		}
-		// Match without prep_call_ts (treated as 0) — sorts to the very front
-		extras.push(make_upcoming_match('u_no_call', undefined));
+		// TBD bracket follow-up: structurally has teams, but every player
+		// name is empty — must be excluded
+		extras.push(make_upcoming_match('tbd', undefined, {
+			scheduled_date: '2026-05-08',
+			scheduled_time_str: '08:00',
+			teams: [
+				{players: [{name: ''}]},
+				{players: [{name: ''}]},
+			],
+		}));
+		// Half-decided bracket: one side is known, the other is empty —
+		// must still appear (at least one player has a name)
+		extras.push(make_upcoming_match('half', undefined, {
+			scheduled_date: '2026-05-08',
+			scheduled_time_str: '08:30',
+			teams: [
+				{players: [{name: 'Winner of QF1'}]},
+				{players: [{name: ''}]},
+			],
+		}));
 		// Finished match — must be excluded (team1_won is set)
-		extras.push(make_finished_match('finished', now - 30 * 1000, true));
-		// Running on a court — must be excluded (court_id + now_on_court)
-		extras.push(make_upcoming_match('on_court', now - 5 * 60 * 1000, {
+		extras.push(make_finished_match('finished', Date.now() - 30 * 1000, true));
+		// Running on a court — must be excluded
+		extras.push(make_upcoming_match('on_court', undefined, {
+			scheduled_date: '2026-05-08',
+			scheduled_time_str: '08:45',
 			court_id: 'cX',
 			now_on_court: true,
 		}));
-		// Placeholder row (is_match=false) — must be excluded
-		const placeholder = make_upcoming_match('placeholder', now - 10 * 60 * 1000);
-		placeholder.setup.is_match = false;
-		extras.push(placeholder);
 
 		const conn = new ticker_conn_http.TickerConnHttp(
 			make_fake_app({extra_matches: extras}),
@@ -468,21 +509,21 @@ _describe('ticker_conn_http', function() {
 
 		const ev = received[0].event;
 		assert.ok(Array.isArray(ev.upcoming_matches));
-		// 17 candidates (u0..u15 + u_no_call) capped to 15
+		// Cap at 15: 17 valid candidates (16 slot matches + half), capped to 15
 		assert.strictEqual(ev.upcoming_matches.length, 15);
-		// Untimestamped match (treated as 0) sorts to position 0
-		assert.strictEqual(ev.upcoming_matches[0]._id, 'u_no_call');
-		// Then oldest call_ts first: u15, u14, ...
-		assert.strictEqual(ev.upcoming_matches[1]._id, 'u15');
-		// Last entry within the cap: u2 (u1 + u0 trimmed off)
-		assert.strictEqual(ev.upcoming_matches[14]._id, 'u2');
-		// Timestamped entries carry preparation_call_ts as a number
-		assert.strictEqual(typeof ev.upcoming_matches[1].preparation_call_ts, 'number');
-		// Untimestamped entry omits the field (JSON.stringify drops undefined)
-		assert.strictEqual(ev.upcoming_matches[0].preparation_call_ts, undefined);
-		// Excluded matches are absent
 		const ids = ev.upcoming_matches.map(m => m._id);
-		assert.ok(!ids.includes('placeholder'));
+		// Day 1 + 'half' (08:30) sorts to position 0 since it has the earliest time
+		assert.strictEqual(ids[0], 'half');
+		// Then day 1 entries in time order
+		assert.strictEqual(ids[1], 'd1_0900');
+		assert.strictEqual(ids[2], 'd1_0935');
+		assert.strictEqual(ids[3], 'd1_0945');
+		// Day 2 entries push out the latest day-1 slots after the cap fires
+		assert.ok(!ids.includes('d2_1135'));
+		// scheduled_time_str is on every entry that had one
+		assert.strictEqual(ev.upcoming_matches[1].scheduled_time_str, '09:00');
+		// Excluded
+		assert.ok(!ids.includes('tbd'), 'TBD bracket slots must be filtered out');
 		assert.ok(!ids.includes('finished'));
 		assert.ok(!ids.includes('on_court'));
 		// The live court match (live_match.m1 has no setup.is_match) is also excluded

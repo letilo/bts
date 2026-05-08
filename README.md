@@ -115,7 +115,7 @@ been called into preparation float to the bottom in order of
 longest-waiting-first; everything not yet called keeps the
 import-order from the BTP file at the front of the list.
 
-Each entry uses the same schema as a live match. Three optional
+Each entry uses the same schema as a live match. Five optional
 fields are emitted only when set:
 
 - `preparation_call_ts` — Unix timestamp (ms) when the match was
@@ -130,6 +130,22 @@ fields are emitted only when set:
   automation pipeline emits.
 - `match_num` — BTP match number (string) for cross-referencing with
   the printed schedule.
+- `scheduled_time_str` — printed-schedule time as a zero-padded
+  string (e.g. `"09:35"`). Doubles as the primary sort key for the
+  array.
+- `scheduled_date` — printed-schedule date in ISO form (`YYYY-MM-DD`).
+  Used as the leading sort key, so multi-day tournaments order
+  correctly across day boundaries.
+
+Bracket follow-up matches whose participants are not yet decided are
+filtered out: a match is included only when at least one team has a
+player with a non-empty name. This avoids filling the array with
+`TBD vs TBD` rows ahead of the actually-next matches.
+
+Sort order matches BTS' own NeDB query in `bts/match_utils.js`:
+ascending by `scheduled_date`, then `scheduled_time_str`, then
+`match_order`. Hall displays therefore see the same row order as the
+operator UI.
 
 The live `event.matches` array is unchanged — it continues to hold
 only the matches that are currently on a court. A match in
