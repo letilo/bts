@@ -17,6 +17,12 @@ const RECONNECT_TIMEOUT = 1000;
 const RECENT_FINISHED_LIMIT = 10;
 const RECENT_FINISHED_WINDOW_MS = 4 * 60 * 60 * 1000;
 
+// How many upcoming matches to include in each tset snapshot. Matches
+// the default of BTS' own "Next Matches" view (curt.upcoming_matches_max_count = 15),
+// which has already proved out as a screen-readable count on hall
+// displays.
+const UPCOMING_LIMIT = 15;
+
 function craft_court(c) {
 	return utils.pluck(c, ['num', 'match_id', '_id']);
 }
@@ -50,6 +56,17 @@ function craft_match(m) {
 	if (m.team1_won !== undefined && m.team1_won !== null) {
 		res.team1_won = m.team1_won;
 	}
+	// Optional preparation info — only present for matches that have
+	// been called into preparation, plus the BTP match number when set.
+	// JSON.stringify drops undefined, so receivers see these fields only
+	// on entries inside `upcoming_matches` (and never on running courts,
+	// which never carry a preparation_call_timestamp).
+	if (m.setup && Number.isFinite(Number(m.setup.preparation_call_timestamp))) {
+		res.preparation_call_ts = Number(m.setup.preparation_call_timestamp);
+	}
+	if (m.setup && m.setup.match_num) {
+		res.match_num = m.setup.match_num;
+	}
 	return res;
 }
 
@@ -71,6 +88,35 @@ function pick_recent_finished(db_matches, now) {
 		finished.length = RECENT_FINISHED_LIMIT;
 	}
 	return finished;
+}
+
+// Mirrors `calc_section(m) === 'unassigned'` from static/js/cmatch.js
+// — a match is "upcoming" when it is neither finished nor currently
+// being played on a court. This matches what BTS' own "Next Matches"
+// view shows. The setup.is_match guard skips placeholder rows that
+// the BTP import surfaces but that aren't actual matches.
+function is_upcoming(m) {
+	if (!m.setup) return false;
+	if (!m.setup.is_match) return false;
+	if (typeof m.team1_won === 'boolean') return false;
+	if (m.setup.court_id && m.setup.now_on_court) return false;
+	return true;
+}
+
+// Pick matches that are upcoming (not finished, not on a live court).
+// Sort identical to BTS' own next-matches UI in static/js/ctournament.js
+// (`get_self_check_in_matches`): ascending by preparation_call_timestamp,
+// missing timestamps fall back to 0 — which keeps the BTP-import order
+// stable for matches that have not been called yet.
+function pick_upcoming(db_matches) {
+	const upcoming = db_matches.filter(is_upcoming);
+	upcoming.sort((a, b) =>
+		(a.setup.preparation_call_timestamp || 0) -
+		(b.setup.preparation_call_timestamp || 0));
+	if (upcoming.length > UPCOMING_LIMIT) {
+		upcoming.length = UPCOMING_LIMIT;
+	}
+	return upcoming;
 }
 
 class TickerConn {
@@ -244,6 +290,7 @@ class TickerConn {
 				courts: db_courts.map(craft_court),
 				matches: interesting_matches.map(craft_match),
 				recent_finished_matches: pick_recent_finished(db_matches, now).map(craft_match),
+				upcoming_matches: pick_upcoming(db_matches).map(craft_match),
 			};
 
 			if (db_tournaments && db_tournaments.length == 1) {

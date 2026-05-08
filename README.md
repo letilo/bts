@@ -103,3 +103,31 @@ should treat them as optional.
 
 The field is always present (even as `[]`) for shape stability. A
 receiver can iterate it unconditionally.
+
+## Ticker payload: upcoming matches
+
+Each `tset` payload carries an `event.upcoming_matches` array
+alongside `event.matches`. It mirrors what BTS itself shows in its
+"Next Matches" view: every match that is neither finished nor
+currently being played on a live court. Capped at 15 entries, sorted
+ascending by `setup.preparation_call_timestamp` — matches that have
+been called into preparation float to the bottom in order of
+longest-waiting-first; everything not yet called keeps the
+import-order from the BTP file at the front of the list.
+
+Each entry uses the same schema as a live match. Two optional fields
+are emitted only when set:
+
+- `preparation_call_ts` — Unix timestamp (ms) when the match was
+  called into preparation. Absent for matches that are still purely
+  scheduled (no call yet).
+- `match_num` — BTP match number (string) for cross-referencing with
+  the printed schedule.
+
+The live `event.matches` array is unchanged — it continues to hold
+only the matches that are currently on a court. A match in
+`upcoming_matches` will move into `event.matches` when it starts
+being played and disappear from `upcoming_matches` at that moment.
+
+The field is always present (even as `[]`) for shape stability. A
+receiver can iterate it unconditionally.
