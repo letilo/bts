@@ -532,6 +532,49 @@ _describe('ticker_conn_http', function() {
 		assert.strictEqual(ev.matches[0]._id, 'm1');
 	});
 
+	_it('matches without scheduled_time sort AFTER scheduled ones, not before', async function() {
+		const received = [];
+		const {server, url} = await make_server((req, body, res) => {
+			received.push(body);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"type":"answer","status":"ok"}');
+		});
+
+		// Mix: a hard-scheduled R16 match at 09:00 plus three "rolling"
+		// group-stage matches with no scheduled_time_str (played as courts
+		// open up). The R16 match must come first; group matches fall to
+		// the end. Before the fix, the empty-string fallback made the
+		// rolling matches sort to the front and the R16 fell out of the
+		// cap window.
+		const extras = [
+			make_upcoming_match('group_b', undefined, {match_order: 50}),
+			make_upcoming_match('group_a', undefined, {match_order: 10}),
+			make_upcoming_match('r16_0900', undefined, {
+				scheduled_date: '2026-05-08',
+				scheduled_time_str: '09:00',
+				match_order: 200,
+			}),
+			make_upcoming_match('group_c', undefined, {match_order: 30}),
+		];
+
+		const conn = new ticker_conn_http.TickerConnHttp(
+			make_fake_app({extra_matches: extras}),
+			url,
+			'pw',
+			'tk'
+		);
+		await wait(300);
+		conn.terminate();
+		server.close();
+
+		const ids = received[0].event.upcoming_matches.map(m => m._id);
+		assert.strictEqual(ids[0], 'r16_0900', 'scheduled match must come first');
+		// Rolling group matches follow, ordered by match_order ascending
+		assert.strictEqual(ids[1], 'group_a');
+		assert.strictEqual(ids[2], 'group_c');
+		assert.strictEqual(ids[3], 'group_b');
+	});
+
 	_it('upcoming_matches is [] when there are no upcoming matches', async function() {
 		const received = [];
 		const {server, url} = await make_server((req, body, res) => {
