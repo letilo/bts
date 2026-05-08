@@ -142,20 +142,39 @@ function is_upcoming(m) {
 	return true;
 }
 
+// Compare two values where missing entries (undefined / null / empty
+// string) sort to the END instead of the front. Lexicographic comparison
+// ascending. The original PR #8 sort fell back to '' for missing values,
+// which made unscheduled matches sort BEFORE scheduled ones (because
+// '' < '09:00' is true) — so the cap dropped real scheduled matches.
+function cmp_missing_last(a, b) {
+	const a_has = (a !== undefined && a !== null && a !== '');
+	const b_has = (b !== undefined && b !== null && b !== '');
+	if (a_has && b_has) {
+		if (a === b) return 0;
+		return a < b ? -1 : 1;
+	}
+	if (a_has) return -1;   // a is set, b isn't -> a first
+	if (b_has) return 1;    // b is set, a isn't -> b first
+	return 0;
+}
+
 // Pick matches that are upcoming. Sort matches BTS' own NeDB query
 // from match_utils.js does (sort: scheduled_date asc,
 // scheduled_time_str asc, match_order asc) so the wire output mirrors
 // what an operator sees in the umpire UI. Strings are zero-padded by
 // the BTP import, so lexicographic comparison gives the right order.
+// Matches without a scheduled date/time sort AFTER scheduled ones, so
+// the cap doesn't drop the actually-next matches when the tournament
+// mixes hard-scheduled rounds (R16 at 09:00) with rolling group games
+// (no fixed time, played as courts open up).
 function pick_upcoming(db_matches) {
 	const upcoming = db_matches.filter(is_upcoming);
 	upcoming.sort((a, b) => {
-		const da = a.setup.scheduled_date || '';
-		const db_ = b.setup.scheduled_date || '';
-		if (da !== db_) return da < db_ ? -1 : 1;
-		const ta = a.setup.scheduled_time_str || '';
-		const tb = b.setup.scheduled_time_str || '';
-		if (ta !== tb) return ta < tb ? -1 : 1;
+		const c1 = cmp_missing_last(a.setup.scheduled_date, b.setup.scheduled_date);
+		if (c1 !== 0) return c1;
+		const c2 = cmp_missing_last(a.setup.scheduled_time_str, b.setup.scheduled_time_str);
+		if (c2 !== 0) return c2;
 		const oa = a.setup.match_order != null ? a.setup.match_order : 0;
 		const ob = b.setup.match_order != null ? b.setup.match_order : 0;
 		return oa - ob;
