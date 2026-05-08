@@ -89,6 +89,28 @@ function make_finished_match(id, end_ts, team1_won, score) {
 	};
 }
 
+function make_upcoming_match(id, prep_call_ts, opts) {
+	opts = opts || {};
+	return {
+		_id: id,
+		network_score: [[0, 0]],
+		setup: {
+			scoring_format: {},
+			event_name: 'HE',
+			match_name: id,
+			is_match: true,
+			preparation_call_timestamp: prep_call_ts,
+			match_num: opts.match_num,
+			court_id: opts.court_id,
+			now_on_court: opts.now_on_court,
+			teams: [
+				{players: [{name: 'Player1'}]},
+				{players: [{name: 'Player2'}]},
+			],
+		},
+	};
+}
+
 function make_server(handler) {
 	return new Promise((resolve) => {
 		const server = http.createServer((req, res) => {
@@ -401,6 +423,90 @@ _describe('ticker_conn_http', function() {
 		// Field is always present for shape stability
 		assert.ok(Array.isArray(ev.recent_finished_matches));
 		assert.strictEqual(ev.recent_finished_matches.length, 0);
+	});
+
+	_it('tset includes upcoming_matches sorted by preparation_call_timestamp, capped at 15', async function() {
+		const received = [];
+		const {server, url} = await make_server((req, body, res) => {
+			received.push(body);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"type":"answer","status":"ok"}');
+		});
+
+		const now = Date.now();
+		const extras = [];
+		// 16 upcoming matches with descending call timestamps so the cap
+		// fires (u0 = newest call, u15 = oldest call). Ascending sort by
+		// preparation_call_timestamp puts u15 nearer the front, u0 last.
+		for (let i = 0; i < 16; i++) {
+			extras.push(make_upcoming_match('u' + i, now - i * 60 * 1000));
+		}
+		// Match without prep_call_ts (treated as 0) — sorts to the very front
+		extras.push(make_upcoming_match('u_no_call', undefined));
+		// Finished match — must be excluded (team1_won is set)
+		extras.push(make_finished_match('finished', now - 30 * 1000, true));
+		// Running on a court — must be excluded (court_id + now_on_court)
+		extras.push(make_upcoming_match('on_court', now - 5 * 60 * 1000, {
+			court_id: 'cX',
+			now_on_court: true,
+		}));
+		// Placeholder row (is_match=false) — must be excluded
+		const placeholder = make_upcoming_match('placeholder', now - 10 * 60 * 1000);
+		placeholder.setup.is_match = false;
+		extras.push(placeholder);
+
+		const conn = new ticker_conn_http.TickerConnHttp(
+			make_fake_app({extra_matches: extras}),
+			url,
+			'pw',
+			'tk'
+		);
+		await wait(300);
+		conn.terminate();
+		server.close();
+
+		const ev = received[0].event;
+		assert.ok(Array.isArray(ev.upcoming_matches));
+		// 17 candidates (u0..u15 + u_no_call) capped to 15
+		assert.strictEqual(ev.upcoming_matches.length, 15);
+		// Untimestamped match (treated as 0) sorts to position 0
+		assert.strictEqual(ev.upcoming_matches[0]._id, 'u_no_call');
+		// Then oldest call_ts first: u15, u14, ...
+		assert.strictEqual(ev.upcoming_matches[1]._id, 'u15');
+		// Last entry within the cap: u2 (u1 + u0 trimmed off)
+		assert.strictEqual(ev.upcoming_matches[14]._id, 'u2');
+		// Timestamped entries carry preparation_call_ts as a number
+		assert.strictEqual(typeof ev.upcoming_matches[1].preparation_call_ts, 'number');
+		// Untimestamped entry omits the field (JSON.stringify drops undefined)
+		assert.strictEqual(ev.upcoming_matches[0].preparation_call_ts, undefined);
+		// Excluded matches are absent
+		const ids = ev.upcoming_matches.map(m => m._id);
+		assert.ok(!ids.includes('placeholder'));
+		assert.ok(!ids.includes('finished'));
+		assert.ok(!ids.includes('on_court'));
+		// The live court match (live_match.m1 has no setup.is_match) is also excluded
+		assert.ok(!ids.includes('m1'));
+		// And the live court match still appears in event.matches as before
+		assert.strictEqual(ev.matches[0]._id, 'm1');
+	});
+
+	_it('upcoming_matches is [] when there are no upcoming matches', async function() {
+		const received = [];
+		const {server, url} = await make_server((req, body, res) => {
+			received.push(body);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"type":"answer","status":"ok"}');
+		});
+
+		const conn = new ticker_conn_http.TickerConnHttp(make_fake_app(), url, 'pw', 'tk');
+		await wait(300);
+		conn.terminate();
+		server.close();
+
+		const ev = received[0].event;
+		// Field is always present for shape stability
+		assert.ok(Array.isArray(ev.upcoming_matches));
+		assert.strictEqual(ev.upcoming_matches.length, 0);
 	});
 
 	_it('sample payload from ticker_data/beispiel_request.json validates', function() {
