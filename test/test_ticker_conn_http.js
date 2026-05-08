@@ -99,6 +99,7 @@ function make_upcoming_match(id, prep_call_ts, opts) {
 			event_name: 'HE',
 			match_name: id,
 			is_match: true,
+			state: opts.state,
 			preparation_call_timestamp: prep_call_ts,
 			match_num: opts.match_num,
 			court_id: opts.court_id,
@@ -507,6 +508,50 @@ _describe('ticker_conn_http', function() {
 		// Field is always present for shape stability
 		assert.ok(Array.isArray(ev.upcoming_matches));
 		assert.strictEqual(ev.upcoming_matches.length, 0);
+	});
+
+	_it('is_called is emitted whenever setup.state === \'preparation\', even without a timestamp', async function() {
+		const received = [];
+		const {server, url} = await make_server((req, body, res) => {
+			received.push(body);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"type":"answer","status":"ok"}');
+		});
+
+		const now = Date.now();
+		const extras = [
+			// Manual call: state set, timestamp NOT set
+			make_upcoming_match('manual', undefined, {state: 'preparation'}),
+			// Automation pipeline: both fields set
+			make_upcoming_match('auto', now - 2 * 60 * 1000, {state: 'preparation'}),
+			// Plain scheduled: no state, no timestamp
+			make_upcoming_match('plain'),
+		];
+
+		const conn = new ticker_conn_http.TickerConnHttp(
+			make_fake_app({extra_matches: extras}),
+			url,
+			'pw',
+			'tk'
+		);
+		await wait(300);
+		conn.terminate();
+		server.close();
+
+		const ev = received[0].event;
+		const byId = {};
+		for (const m of ev.upcoming_matches) {
+			byId[m._id] = m;
+		}
+		// Manual-called match: is_called set, no timestamp leaked
+		assert.strictEqual(byId.manual.is_called, true);
+		assert.strictEqual(byId.manual.preparation_call_ts, undefined);
+		// Automated match: both surfaced
+		assert.strictEqual(byId.auto.is_called, true);
+		assert.strictEqual(typeof byId.auto.preparation_call_ts, 'number');
+		// Scheduled match: neither field
+		assert.strictEqual(byId.plain.is_called, undefined);
+		assert.strictEqual(byId.plain.preparation_call_ts, undefined);
 	});
 
 	_it('sample payload from ticker_data/beispiel_request.json validates', function() {

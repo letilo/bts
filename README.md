@@ -115,12 +115,19 @@ been called into preparation float to the bottom in order of
 longest-waiting-first; everything not yet called keeps the
 import-order from the BTP file at the front of the list.
 
-Each entry uses the same schema as a live match. Two optional fields
-are emitted only when set:
+Each entry uses the same schema as a live match. Three optional
+fields are emitted only when set:
 
 - `preparation_call_ts` — Unix timestamp (ms) when the match was
-  called into preparation. Absent for matches that are still purely
-  scheduled (no call yet).
+  called into preparation. **Only set by the automation pipeline**
+  (`add_preparation_call_timestamp` in `bts/match_utils.js`). Manual
+  calls do not write this field.
+- `is_called` — `true` when `setup.state === 'preparation'`. Surfaces
+  the called state for both manual and automated calls, so a receiver
+  can recognize "called into preparation" without depending on the
+  timestamp. Use this as the primary "called" indicator and treat
+  `preparation_call_ts` as an optional sub-indicator that only the
+  automation pipeline emits.
 - `match_num` — BTP match number (string) for cross-referencing with
   the printed schedule.
 
