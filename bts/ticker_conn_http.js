@@ -85,6 +85,15 @@ function craft_match(m) {
 	if (m.setup && m.setup.match_num) {
 		res.match_num = m.setup.match_num;
 	}
+	// Manual calls in BTS may set setup.state to 'preparation' without
+	// also setting preparation_call_timestamp — only the automation
+	// pipeline writes the timestamp (see add_preparation_call_timestamp
+	// in bts/match_utils.js). Surface the state as a separate boolean
+	// so a receiver can recognize "called into preparation" in either
+	// pathway without depending on the timestamp being present.
+	if (m.setup && m.setup.state === 'preparation') {
+		res.is_called = true;
+	}
 	return res;
 }
 
